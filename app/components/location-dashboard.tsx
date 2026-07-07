@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -15,7 +15,7 @@ interface GpsData {
 }
 
 interface IpGeoData {
-  query: string;       // IP used for lookup
+  query: string;
   country: string;
   countryCode: string;
   region: string;
@@ -39,24 +39,81 @@ interface State {
   gpsLoading: boolean;
   gpsError: string | null;
   gps: GpsData | null;
-
   ipLoading: boolean;
   ipError: string | null;
   ipGeo: IpGeoData | null;
   ipv4: string | null;
   ipv6: string | null;
-
   copied: string | null;
+}
+
+// ─── Parsers ──────────────────────────────────────────────────────────────────
+
+function parseIpwho(raw: Record<string, unknown>): IpGeoData | null {
+  if (raw.success === false) return null;
+  const conn = (raw.connection ?? {}) as Record<string, unknown>;
+  const tz   = (raw.timezone  ?? {}) as Record<string, unknown>;
+  const sec  = (raw.security  ?? {}) as Record<string, unknown>;
+  return {
+    query:       String(raw.ip           ?? ""),
+    country:     String(raw.country      ?? ""),
+    countryCode: String(raw.country_code ?? ""),
+    region:      String(raw.region_code  ?? ""),
+    regionName:  String(raw.region       ?? ""),
+    city:        String(raw.city         ?? ""),
+    zip:         String(raw.postal       ?? ""),
+    lat:         Number(raw.latitude     ?? 0),
+    lon:         Number(raw.longitude    ?? 0),
+    timezone:    String(tz.id            ?? ""),
+    utcOffset:   String(tz.utc           ?? ""),
+    isp:         String(conn.isp ?? conn.org ?? ""),
+    org:         String(conn.org         ?? ""),
+    domain:      String(conn.domain      ?? ""),
+    asn:         conn.asn ? `AS${conn.asn}` : "",
+    mobile:      false,
+    proxy:       Boolean(sec.proxy       ?? false),
+    hosting:     Boolean(sec.hosting     ?? false),
+  };
+}
+
+function parseIpapi(raw: Record<string, unknown>): IpGeoData | null {
+  if (raw.error) return null;
+  // utc_offset from ipapi.co is "+0500" → normalise to "+05:00"
+  const rawOffset = String(raw.utc_offset ?? "");
+  const utcOffset = rawOffset.length === 5
+    ? `${rawOffset.slice(0, 3)}:${rawOffset.slice(3)}`
+    : rawOffset;
+  // org field includes ASN prefix: "AS9541 Cyber Internet..." — split it out
+  const orgFull  = String(raw.org ?? "");
+  const asnMatch = orgFull.match(/^(AS\d+)\s*/);
+  const asn = asnMatch?.[1] ?? String(raw.asn ?? "");
+  const org = asnMatch ? orgFull.slice(asnMatch[0].length) : orgFull;
+  return {
+    query:       String(raw.ip           ?? ""),
+    country:     String(raw.country_name ?? ""),
+    countryCode: String(raw.country_code ?? raw.country ?? ""),
+    region:      String(raw.region_code  ?? ""),
+    regionName:  String(raw.region       ?? ""),
+    city:        String(raw.city         ?? ""),
+    zip:         String(raw.postal       ?? ""),
+    lat:         Number(raw.latitude     ?? 0),
+    lon:         Number(raw.longitude    ?? 0),
+    timezone:    String(raw.timezone     ?? ""),
+    utcOffset,
+    isp:         org,
+    org,
+    domain:      "",
+    asn,
+    mobile:      false,
+    proxy:       false,
+    hosting:     false,
+  };
 }
 
 // ─── Helper Components ────────────────────────────────────────────────────────
 
 function Skeleton({ w = "w-full", h = "h-5" }: { w?: string; h?: string }) {
-  return (
-    <div
-      className={`${w} ${h} bg-neutral-100 rounded animate-pulse`}
-    />
-  );
+  return <div className={`${w} ${h} bg-neutral-100 rounded animate-pulse`} />;
 }
 
 function Badge({ label, color }: { label: string; color: "green" | "yellow" | "red" | "blue" | "neutral" }) {
@@ -68,19 +125,14 @@ function Badge({ label, color }: { label: string; color: "green" | "yellow" | "r
     neutral: "bg-neutral-100 text-neutral-600 border-neutral-200",
   };
   return (
-    <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold border ${colors[color]}`}>
+    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-semibold border ${colors[color]}`}>
       {label}
     </span>
   );
 }
 
 function DataRow({
-  label,
-  value,
-  mono = false,
-  onCopy,
-  copied,
-  badge,
+  label, value, mono = false, onCopy, copied, badge,
 }: {
   label: string;
   value: string | null | undefined;
@@ -115,7 +167,7 @@ function DataRow({
               </svg>
             ) : (
               <svg className="w-3.5 h-3.5 text-neutral-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                <rect x="9" y="9" width="13" height="13" rx="2" />
                 <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
               </svg>
             )}
@@ -127,34 +179,24 @@ function DataRow({
 }
 
 function SectionCard({
-  icon,
-  title,
-  children,
-  accent = "neutral",
+  icon, title, children, accent = "neutral",
 }: {
   icon: React.ReactNode;
   title: string;
   children: React.ReactNode;
   accent?: "blue" | "violet" | "emerald" | "amber" | "neutral";
 }) {
-  const accents = {
-    blue:    "from-blue-500/10 to-transparent border-blue-100",
-    violet:  "from-violet-500/10 to-transparent border-violet-100",
-    emerald: "from-emerald-500/10 to-transparent border-emerald-100",
-    amber:   "from-amber-500/10 to-transparent border-amber-100",
-    neutral: "from-neutral-100 to-transparent border-neutral-100",
-  };
-  const iconColors = {
-    blue:    "text-blue-600",
-    violet:  "text-violet-600",
-    emerald: "text-emerald-600",
-    amber:   "text-amber-600",
-    neutral: "text-neutral-500",
-  };
+  const styles = {
+    blue:    { wrap: "border-blue-100",    grad: "from-blue-500/10",    icon: "text-blue-600" },
+    violet:  { wrap: "border-violet-100",  grad: "from-violet-500/10",  icon: "text-violet-600" },
+    emerald: { wrap: "border-emerald-100", grad: "from-emerald-500/10", icon: "text-emerald-600" },
+    amber:   { wrap: "border-amber-100",   grad: "from-amber-500/10",   icon: "text-amber-600" },
+    neutral: { wrap: "border-neutral-100", grad: "from-neutral-100",    icon: "text-neutral-500" },
+  }[accent];
   return (
-    <div className={`bg-white rounded-2xl border shadow-sm overflow-hidden ${accents[accent]}`}>
-      <div className={`bg-gradient-to-b ${accents[accent]} px-5 py-4 border-b flex items-center gap-3`}>
-        <span className={`${iconColors[accent]}`}>{icon}</span>
+    <div className={`bg-white rounded-2xl border shadow-sm overflow-hidden ${styles.wrap}`}>
+      <div className={`bg-gradient-to-b ${styles.grad} to-transparent px-5 py-4 border-b ${styles.wrap} flex items-center gap-3`}>
+        <span className={styles.icon}>{icon}</span>
         <h3 className="text-sm font-semibold text-neutral-800 tracking-wide">{title}</h3>
       </div>
       <div className="px-5 py-1">{children}</div>
@@ -163,7 +205,6 @@ function SectionCard({
 }
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
-
 const GlobeIcon = () => (
   <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
     <circle cx="12" cy="12" r="10" /><line x1="2" y1="12" x2="22" y2="12" />
@@ -243,16 +284,15 @@ export default function LocationDashboard() {
     );
   }, []);
 
-  // ── IP Geolocation ──
+  // ── IP Geolocation with automatic fallback ──
   useEffect(() => {
     const fetchIpData = async () => {
       try {
-        // Fetch IPv4, IPv6, and geo concurrently.
-        // ipwho.is is HTTPS-native and free with no API key required.
+        // Run IPv4, IPv6, and primary geo API concurrently
         const [ipv4Res, ipv6Res, geoRes] = await Promise.allSettled([
           fetch("https://api4.ipify.org?format=json"),
           fetch("https://api6.ipify.org?format=json"),
-          fetch("https://ipwho.is/"),
+          fetch("https://ipwho.is/"),           // Primary — HTTPS, free, no key
         ]);
 
         let ipv4: string | null = null;
@@ -267,29 +307,21 @@ export default function LocationDashboard() {
           if (d.ip && d.ip.includes(":")) ipv6 = d.ip;
         }
 
+        // ── Try primary: ipwho.is ──
+        let geo: IpGeoData | null = null;
         if (geoRes.status === "fulfilled" && geoRes.value.ok) {
-          // ipwho.is response shape (nested connection + timezone objects)
-          const raw = await geoRes.value.json();
-          if (raw.success === false) {
-            setState((s) => ({ ...s, ipLoading: false, ipError: raw.message ?? "IP lookup failed.", ipv4, ipv6 }));
-            return;
-          }
-          const geo: IpGeoData = {
-            query:       raw.ip,
-            country:     raw.country        ?? "",
-            countryCode: raw.country_code   ?? "",
           try {
             const raw = await geoRes.value.json() as Record<string, unknown>;
             geo = parseIpwho(raw);
-          } catch { /* parse failed – fall through to fallback */ }
+          } catch { /* malformed JSON – fall through */ }
         }
 
-        // ── Fallback to ipapi.co if primary failed ──
+        // ── Fallback: ipapi.co (if primary rate-limited or failed) ──
         if (!geo) {
           try {
-            const fallbackRes = await fetch("https://ipapi.co/json/");
-            if (fallbackRes.ok) {
-              const raw = await fallbackRes.json() as Record<string, unknown>;
+            const res = await fetch("https://ipapi.co/json/");
+            if (res.ok) {
+              const raw = await res.json() as Record<string, unknown>;
               geo = parseIpapi(raw);
             }
           } catch { /* fallback also failed */ }
@@ -298,13 +330,20 @@ export default function LocationDashboard() {
         if (geo) {
           setState((s) => ({ ...s, ipLoading: false, ipGeo: geo, ipError: null, ipv4, ipv6 }));
         } else {
-          setState((s) => ({ ...s, ipLoading: false, ipError: "Failed to fetch IP data.", ipv4, ipv6 }));
+          setState((s) => ({ ...s, ipLoading: false, ipError: "Could not resolve IP geolocation.", ipv4, ipv6 }));
         }
       } catch {
         setState((s) => ({ ...s, ipLoading: false, ipError: "Network error fetching IP data." }));
       }
     };
     fetchIpData();
+  }, []);
+
+  // ── Real-time clock ──
+  const [now, setNow] = useState<Date>(() => new Date());
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
   }, []);
 
   // ── Copy ──
@@ -317,18 +356,10 @@ export default function LocationDashboard() {
 
   const { gps, gpsLoading, gpsError, ipGeo, ipLoading, ipError, ipv4, ipv6, copied } = state;
 
-  // Build Google Maps link
-  const mapsUrl =
-    gps ? `https://www.google.com/maps?q=${gps.latitude.toFixed(6)},${gps.longitude.toFixed(6)}` : null;
+  const mapsUrl = gps
+    ? `https://www.google.com/maps?q=${gps.latitude.toFixed(6)},${gps.longitude.toFixed(6)}`
+    : null;
 
-  // ── Real-time clock ──
-  const [now, setNow] = useState<Date>(() => new Date());
-  useEffect(() => {
-    const id = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(id);
-  }, []);
-
-  // Local time formatted in the detected timezone
   const localTime = ipGeo?.timezone
     ? now.toLocaleString("en-US", {
         timeZone: ipGeo.timezone,
@@ -347,7 +378,6 @@ export default function LocationDashboard() {
 
       {/* ── Hero Coordinate Bar ─────────────────────────────────────────── */}
       <div className="w-full bg-neutral-950 text-white rounded-2xl p-6 md:p-8 relative overflow-hidden">
-        {/* Decorative glow */}
         <div className="absolute -top-12 -right-12 w-48 h-48 bg-blue-500/20 rounded-full blur-3xl pointer-events-none" />
         <div className="absolute -bottom-8 -left-8 w-36 h-36 bg-violet-500/15 rounded-full blur-2xl pointer-events-none" />
 
@@ -448,13 +478,10 @@ export default function LocationDashboard() {
                 label="Organisation"
                 value={ipGeo
                   ? (ipGeo.org && ipGeo.org !== ipGeo.isp ? ipGeo.org : ipGeo.domain || null)
-                  : null
-                }
+                  : null}
               />
               <DataRow label="AS Number" value={ipGeo?.asn} mono />
-              {ipError && (
-                <p className="text-xs text-red-500 py-2">{ipError}</p>
-              )}
+              {ipError && <p className="text-xs text-red-500 py-2">{ipError}</p>}
             </>
           )}
         </SectionCard>
@@ -496,7 +523,7 @@ export default function LocationDashboard() {
           )}
         </SectionCard>
 
-        {/* Security & Connection Flags */}
+        {/* Security & Connection */}
         <SectionCard icon={<ShieldIcon />} title="Connection & Security" accent="amber">
           {ipLoading ? (
             <div className="space-y-3 py-3">
@@ -534,18 +561,18 @@ export default function LocationDashboard() {
         </SectionCard>
       </div>
 
-      {/* ── GPS Detail Strip ────────────────────────────────────────────── */}
+      {/* ── GPS Hardware Details ────────────────────────────────────────── */}
       {!gpsLoading && gps && (
         <SectionCard icon={<PinIcon />} title="GPS Hardware Details" accent="neutral">
           <div className="grid grid-cols-2 md:grid-cols-4 gap-0 divide-x divide-y divide-neutral-50">
             {[
-              { label: "Latitude",     value: `${gps.latitude.toFixed(7)}°` },
-              { label: "Longitude",    value: `${gps.longitude.toFixed(7)}°` },
-              { label: "Accuracy",     value: `±${gps.accuracy.toFixed(1)} m` },
-              { label: "Altitude",     value: gps.altitude !== null ? `${gps.altitude.toFixed(1)} m` : null },
-              { label: "Alt. Accuracy",value: gps.altitudeAccuracy !== null ? `±${gps.altitudeAccuracy.toFixed(1)} m` : null },
-              { label: "Heading",      value: gps.heading !== null ? `${gps.heading.toFixed(1)}°` : null },
-              { label: "Speed",        value: gps.speed !== null && gps.speed > 0 ? `${(gps.speed * 3.6).toFixed(2)} km/h` : null },
+              { label: "Latitude",      value: `${gps.latitude.toFixed(7)}°` },
+              { label: "Longitude",     value: `${gps.longitude.toFixed(7)}°` },
+              { label: "Accuracy",      value: `±${gps.accuracy.toFixed(1)} m` },
+              { label: "Altitude",      value: gps.altitude !== null ? `${gps.altitude.toFixed(1)} m` : null },
+              { label: "Alt. Accuracy", value: gps.altitudeAccuracy !== null ? `±${gps.altitudeAccuracy.toFixed(1)} m` : null },
+              { label: "Heading",       value: gps.heading !== null ? `${gps.heading.toFixed(1)}°` : null },
+              { label: "Speed",         value: gps.speed !== null && gps.speed > 0 ? `${(gps.speed * 3.6).toFixed(2)} km/h` : null },
               {
                 label: "DMS Lat",
                 value: (() => {
@@ -584,7 +611,7 @@ export default function LocationDashboard() {
               ipv4 && `IPv4: ${ipv4}`,
               ipv6 && `IPv6: ${ipv6}`,
               ipGeo?.isp && `ISP: ${ipGeo.isp}`,
-              ipGeo?.org && `Organisation: ${ipGeo.org}`,
+              ipGeo?.org && ipGeo.org !== ipGeo.isp && `Organisation: ${ipGeo.org}`,
               ipGeo?.asn && `AS: ${ipGeo.asn}`,
               ipGeo?.country && `Country: ${ipGeo.country} (${ipGeo.countryCode})`,
               ipGeo?.regionName && `State: ${ipGeo.regionName}`,
