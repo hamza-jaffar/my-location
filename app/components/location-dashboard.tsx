@@ -278,22 +278,24 @@ export default function LocationDashboard() {
             query:       raw.ip,
             country:     raw.country        ?? "",
             countryCode: raw.country_code   ?? "",
-            region:      raw.region_code    ?? "",
-            regionName:  raw.region         ?? "",
-            city:        raw.city           ?? "",
-            zip:         raw.postal         ?? "",
-            lat:         raw.latitude       ?? 0,
-            lon:         raw.longitude      ?? 0,
-            timezone:    raw.timezone?.id   ?? "",
-            utcOffset:   raw.timezone?.utc  ?? "",
-            isp:         raw.connection?.isp  ?? raw.connection?.org ?? "",
-            org:         raw.connection?.org  ?? "",
-            domain:      raw.connection?.domain ?? "",
-            asn:         raw.connection?.asn  ? `AS${raw.connection.asn}` : "",
-            mobile:      false,
-            proxy:       raw.security?.proxy  ?? false,
-            hosting:     raw.security?.hosting ?? false,
-          };
+          try {
+            const raw = await geoRes.value.json() as Record<string, unknown>;
+            geo = parseIpwho(raw);
+          } catch { /* parse failed – fall through to fallback */ }
+        }
+
+        // ── Fallback to ipapi.co if primary failed ──
+        if (!geo) {
+          try {
+            const fallbackRes = await fetch("https://ipapi.co/json/");
+            if (fallbackRes.ok) {
+              const raw = await fallbackRes.json() as Record<string, unknown>;
+              geo = parseIpapi(raw);
+            }
+          } catch { /* fallback also failed */ }
+        }
+
+        if (geo) {
           setState((s) => ({ ...s, ipLoading: false, ipGeo: geo, ipError: null, ipv4, ipv6 }));
         } else {
           setState((s) => ({ ...s, ipLoading: false, ipError: "Failed to fetch IP data.", ipv4, ipv6 }));
