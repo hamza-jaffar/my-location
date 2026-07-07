@@ -319,9 +319,16 @@ export default function LocationDashboard() {
   const mapsUrl =
     gps ? `https://www.google.com/maps?q=${gps.latitude.toFixed(6)},${gps.longitude.toFixed(6)}` : null;
 
-  // Local time in detected timezone
+  // ── Real-time clock ──
+  const [now, setNow] = useState<Date>(() => new Date());
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Local time formatted in the detected timezone
   const localTime = ipGeo?.timezone
-    ? new Date().toLocaleString("en-US", {
+    ? now.toLocaleString("en-US", {
         timeZone: ipGeo.timezone,
         weekday: "short",
         year: "numeric",
