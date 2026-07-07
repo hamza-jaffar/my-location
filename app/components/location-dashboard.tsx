@@ -35,7 +35,7 @@ export default function LocationDashboard() {
     });
   }, []);
 
-  // ── GPS Tracking & IP Synchronization ──
+  // ── GPS Tracking, IP Sync & Reverse Geocoding ──
   useEffect(() => {
     if (!navigator.geolocation) {
       setState((s) => ({ ...s, gpsLoading: false, gpsError: "Geolocation not supported by your browser." }));
@@ -43,10 +43,11 @@ export default function LocationDashboard() {
     }
     navigator.geolocation.getCurrentPosition(
       (pos) => {
+        const { latitude, longitude } = pos.coords;
+
         setState((s) => {
-          // Explicitly sync the ipGeo coordinates to match the live hardware coordinates
           const updatedIpGeo = s.ipGeo
-            ? { ...s.ipGeo, lat: pos.coords.latitude, lon: pos.coords.longitude }
+            ? { ...s.ipGeo, lat: latitude, lon: longitude }
             : null;
 
           return {
@@ -54,8 +55,8 @@ export default function LocationDashboard() {
             gpsLoading: false,
             ipGeo: updatedIpGeo,
             gps: {
-              latitude: pos.coords.latitude,
-              longitude: pos.coords.longitude,
+              latitude,
+              longitude,
               altitude: pos.coords.altitude,
               accuracy: pos.coords.accuracy,
               altitudeAccuracy: pos.coords.altitudeAccuracy,
@@ -64,6 +65,52 @@ export default function LocationDashboard() {
             },
           };
         });
+
+        // ── Reverse Geocode to correct IP Routing Hub inaccuracies ──
+        fetch(`https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json`)
+          .then((res) => res.json())
+          .then((addressData) => {
+            if (addressData && addressData.address) {
+              const addr = addressData.address;
+              // Detect precise location components returned by hardware coordinates
+              const preciseCity = addr.city || addr.town || addr.village || addr.suburb;
+              const preciseZip = addr.postcode;
+
+              if (preciseCity || preciseZip) {
+                setState((s) => {
+                  // Case 1: If ipGeo metadata already arrived, merge hardware location overrides
+                  if (s.ipGeo) {
+                    return {
+                      ...s,
+                      ipGeo: {
+                        ...s.ipGeo,
+                        city: preciseCity || s.ipGeo.city,
+                        zip: preciseZip || s.ipGeo.zip,
+                      },
+                    };
+                  }
+
+                  // Case 2: If network IP fetch is still pending, pre-populate coordinates and location components
+                  return {
+                    ...s,
+                    ipGeo: {
+                      city: preciseCity || "",
+                      zip: preciseZip || "N/A",
+                      country: addr.country || "",
+                      countryCode: addr.country_code?.toUpperCase() || "",
+                      regionName: addr.state || "",
+                      lat: latitude,
+                      lon: longitude,
+                      timezone: "",
+                      isp: "",
+                      asn: "",
+                    } as unknown as IpGeoData,
+                  };
+                });
+              }
+            }
+          })
+          .catch(() => { /* Fallback gracefully if rate-limited or offline */ });
       },
       (err) => {
         const msgs: Record<number, string> = {
@@ -99,16 +146,14 @@ export default function LocationDashboard() {
           if (d.ip && d.ip.includes(":")) ipv6 = d.ip;
         }
 
-        // ── Try primary: ipwho.is ──
         let geo: IpGeoData | null = null;
         if (geoRes.status === "fulfilled" && geoRes.value.ok) {
           try {
             const raw = await geoRes.value.json() as Record<string, unknown>;
             geo = parseIpwho(raw);
-          } catch { /* malformed JSON – fall through */ }
+          } catch { /* Fallthrough */ }
         }
 
-        // ── Fallback: ipapi.co ──
         if (!geo) {
           try {
             const res = await fetch("https://ipapi.co/json/");
@@ -116,29 +161,35 @@ export default function LocationDashboard() {
               const raw = await res.json() as Record<string, unknown>;
               geo = parseIpapi(raw);
             }
-          } catch { /* fallback also failed */ }
+          } catch { /* Fallback failed */ }
         }
 
-        if (geo) {
-          setState((s) => {
-            // If GPS hardware resolved faster than the IP mesh networks,
-            // make sure we preserve the exact physical location coordinates.
-            const verifiedGeo = s.gps
-              ? { ...geo!, lat: s.gps.latitude, lon: s.gps.longitude }
-              : geo;
+        setState((s) => {
+          let verifiedGeo = geo;
 
-            return {
-              ...s,
-              ipLoading: false,
-              ipGeo: verifiedGeo,
-              ipError: null,
-              ipv4,
-              ipv6,
+          if (geo) {
+            // Overwrite incoming network data fields if precise data was already caught by the GPS hook
+            verifiedGeo = {
+              ...geo,
+              lat: s.gps ? s.gps.latitude : geo.lat,
+              lon: s.gps ? s.gps.longitude : geo.lon,
+              city: s.ipGeo?.city ? s.ipGeo.city : geo.city,
+              zip: s.ipGeo?.zip ? s.ipGeo.zip : geo.zip,
             };
-          });
-        } else {
-          setState((s) => ({ ...s, ipLoading: false, ipError: "Could not resolve IP geolocation.", ipv4, ipv6 }));
-        }
+          } else if (s.ipGeo) {
+            // Preserve the pre-populated geocode data if the network services failed completely
+            verifiedGeo = s.ipGeo;
+          }
+
+          return {
+            ...s,
+            ipLoading: false,
+            ipGeo: verifiedGeo,
+            ipError: verifiedGeo ? null : "Could not resolve IP geolocation.",
+            ipv4,
+            ipv6,
+          };
+        });
       } catch {
         setState((s) => ({ ...s, ipLoading: false, ipError: "Network error fetching IP data." }));
       }
@@ -199,7 +250,6 @@ export default function LocationDashboard() {
             </div>
           ) : gps ? (
             <>
-              {/* Stack coordinates vertically on extra small screens to prevent text clipping */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6 md:gap-8">
                 <div className="pb-3 sm:pb-0 border-b border-white/5 sm:border-0">
                   <p className="text-[10px] font-semibold tracking-widest text-neutral-500 uppercase mb-1">Latitude</p>
@@ -215,7 +265,6 @@ export default function LocationDashboard() {
                 </div>
               </div>
 
-              {/* Adjust layout wraps and layout parameters across viewport breaks */}
               <div className="flex flex-col sm:flex-row sm:flex-wrap items-start sm:items-center gap-3 mt-5 pt-5 border-t border-white/10">
                 <div className="flex flex-wrap gap-x-4 gap-y-2 text-xs text-neutral-400 w-full sm:w-auto">
                   <div>
@@ -276,14 +325,14 @@ export default function LocationDashboard() {
                 onCopy={ipv6 ? () => copy("ipv6", ipv6) : undefined}
                 copied={copied === "ipv6"}
               />
-              <DataRow label="ISP" value={ipGeo?.isp} />
+              <DataRow label="ISP" value={ipGeo?.isp || "N/A"} />
               <DataRow
                 label="Organisation"
                 value={ipGeo
                   ? (ipGeo.org && ipGeo.org !== ipGeo.isp ? ipGeo.org : ipGeo.domain || null)
                   : null}
               />
-              <DataRow label="AS Number" value={ipGeo?.asn} mono />
+              <DataRow label="AS Number" value={ipGeo?.asn || "N/A"} mono />
               {ipError && <p className="text-xs text-red-500 py-2">{ipError}</p>}
             </>
           )}
@@ -291,13 +340,13 @@ export default function LocationDashboard() {
 
         {/* Physical Location */}
         <SectionCard icon={<GlobeIcon />} title="Physical Location" accent="emerald">
-          {ipLoading ? (
+          {ipLoading && !ipGeo?.zip ? (
             <div className="space-y-3 py-3">
               <Skeleton /><Skeleton w="w-4/5" /><Skeleton w="w-3/5" />
             </div>
           ) : (
             <>
-              <DataRow label="Country" value={ipGeo ? `${ipGeo.country} (${ipGeo.countryCode})` : null} />
+              <DataRow label="Country" value={ipGeo?.country ? `${ipGeo.country} (${ipGeo.countryCode})` : null} />
               <DataRow label="State / Region" value={ipGeo?.regionName} />
               <DataRow label="City" value={ipGeo?.city} />
               <DataRow label="Postal Code" value={ipGeo?.zip || "N/A"} mono />
@@ -312,23 +361,23 @@ export default function LocationDashboard() {
 
         {/* Timezone & Time */}
         <SectionCard icon={<ClockIcon />} title="Timezone & Local Time" accent="violet">
-          {ipLoading ? (
+          {ipLoading && !ipGeo?.timezone ? (
             <div className="space-y-3 py-3">
               <Skeleton /><Skeleton w="w-4/5" />
             </div>
           ) : (
             <>
-              <DataRow label="Timezone" value={ipGeo?.timezone} mono />
+              <DataRow label="Timezone" value={ipGeo?.timezone || "N/A"} mono />
               <DataRow label="Local Time" value={localTime} mono />
               <DataRow label="UTC Offset" value={ipGeo?.utcOffset ?? null} mono />
-              <DataRow label="Region Code" value={ipGeo?.region} mono />
+              <DataRow label="Region Code" value={ipGeo?.region || "N/A"} mono />
             </>
           )}
         </SectionCard>
 
         {/* Security & Connection */}
         <SectionCard icon={<ShieldIcon />} title="Connection & Security" accent="amber">
-          {ipLoading ? (
+          {ipLoading && !ipGeo ? (
             <div className="space-y-3 py-3">
               <Skeleton /><Skeleton w="w-4/5" /><Skeleton w="w-3/5" />
             </div>
@@ -336,17 +385,17 @@ export default function LocationDashboard() {
             <>
               <DataRow
                 label="Proxy / VPN"
-                value={ipGeo ? (ipGeo.proxy ? "Detected" : "Not Detected") : null}
+                value={ipGeo ? (ipGeo.proxy ? "Detected" : "Not Detected") : "Checking…"}
                 badge={ipGeo ? <Badge label={ipGeo.proxy ? "Active" : "Clean"} color={ipGeo.proxy ? "red" : "green"} /> : undefined}
               />
               <DataRow
                 label="Mobile Network"
-                value={ipGeo ? (ipGeo.mobile ? "Yes" : "No") : null}
+                value={ipGeo ? (ipGeo.mobile ? "Yes" : "No") : "Checking…"}
                 badge={ipGeo ? <Badge label={ipGeo.mobile ? "Mobile" : "Broadband"} color={ipGeo.mobile ? "blue" : "neutral"} /> : undefined}
               />
               <DataRow
                 label="Hosting / DC"
-                value={ipGeo ? (ipGeo.hosting ? "Yes — Datacenter IP" : "No — Residential") : null}
+                value={ipGeo ? (ipGeo.hosting ? "Yes — Datacenter IP" : "No — Residential") : "Checking…"}
                 badge={ipGeo ? <Badge label={ipGeo.hosting ? "DC" : "Residential"} color={ipGeo.hosting ? "yellow" : "green"} /> : undefined}
               />
               <DataRow
