@@ -1,241 +1,17 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
-
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-interface GpsData {
-  latitude: number;
-  longitude: number;
-  altitude: number | null;
-  accuracy: number;
-  altitudeAccuracy: number | null;
-  heading: number | null;
-  speed: number | null;
-}
-
-interface IpGeoData {
-  query: string;
-  country: string;
-  countryCode: string;
-  region: string;
-  regionName: string;
-  city: string;
-  zip: string;
-  lat: number;
-  lon: number;
-  timezone: string;
-  utcOffset: string;
-  isp: string;
-  org: string;
-  domain: string;
-  asn: string;
-  mobile: boolean;
-  proxy: boolean;
-  hosting: boolean;
-}
-
-interface State {
-  gpsLoading: boolean;
-  gpsError: string | null;
-  gps: GpsData | null;
-  ipLoading: boolean;
-  ipError: string | null;
-  ipGeo: IpGeoData | null;
-  ipv4: string | null;
-  ipv6: string | null;
-  copied: string | null;
-}
-
-// ─── Parsers ──────────────────────────────────────────────────────────────────
-
-function parseIpwho(raw: Record<string, unknown>): IpGeoData | null {
-  if (raw.success === false) return null;
-  const conn = (raw.connection ?? {}) as Record<string, unknown>;
-  const tz   = (raw.timezone  ?? {}) as Record<string, unknown>;
-  const sec  = (raw.security  ?? {}) as Record<string, unknown>;
-  return {
-    query:       String(raw.ip           ?? ""),
-    country:     String(raw.country      ?? ""),
-    countryCode: String(raw.country_code ?? ""),
-    region:      String(raw.region_code  ?? ""),
-    regionName:  String(raw.region       ?? ""),
-    city:        String(raw.city         ?? ""),
-    zip:         String(raw.postal       ?? ""),
-    lat:         Number(raw.latitude     ?? 0),
-    lon:         Number(raw.longitude    ?? 0),
-    timezone:    String(tz.id            ?? ""),
-    utcOffset:   String(tz.utc           ?? ""),
-    isp:         String(conn.isp ?? conn.org ?? ""),
-    org:         String(conn.org         ?? ""),
-    domain:      String(conn.domain      ?? ""),
-    asn:         conn.asn ? `AS${conn.asn}` : "",
-    mobile:      false,
-    proxy:       Boolean(sec.proxy       ?? false),
-    hosting:     Boolean(sec.hosting     ?? false),
-  };
-}
-
-function parseIpapi(raw: Record<string, unknown>): IpGeoData | null {
-  if (raw.error) return null;
-  // utc_offset from ipapi.co is "+0500" → normalise to "+05:00"
-  const rawOffset = String(raw.utc_offset ?? "");
-  const utcOffset = rawOffset.length === 5
-    ? `${rawOffset.slice(0, 3)}:${rawOffset.slice(3)}`
-    : rawOffset;
-  // org field includes ASN prefix: "AS9541 Cyber Internet..." — split it out
-  const orgFull  = String(raw.org ?? "");
-  const asnMatch = orgFull.match(/^(AS\d+)\s*/);
-  const asn = asnMatch?.[1] ?? String(raw.asn ?? "");
-  const org = asnMatch ? orgFull.slice(asnMatch[0].length) : orgFull;
-  return {
-    query:       String(raw.ip           ?? ""),
-    country:     String(raw.country_name ?? ""),
-    countryCode: String(raw.country_code ?? raw.country ?? ""),
-    region:      String(raw.region_code  ?? ""),
-    regionName:  String(raw.region       ?? ""),
-    city:        String(raw.city         ?? ""),
-    zip:         String(raw.postal       ?? ""),
-    lat:         Number(raw.latitude     ?? 0),
-    lon:         Number(raw.longitude    ?? 0),
-    timezone:    String(raw.timezone     ?? ""),
-    utcOffset,
-    isp:         org,
-    org,
-    domain:      "",
-    asn,
-    mobile:      false,
-    proxy:       false,
-    hosting:     false,
-  };
-}
-
-// ─── Helper Components ────────────────────────────────────────────────────────
-
-function Skeleton({ w = "w-full", h = "h-5" }: { w?: string; h?: string }) {
-  return <div className={`${w} ${h} bg-neutral-100 rounded animate-pulse`} />;
-}
-
-function Badge({ label, color }: { label: string; color: "green" | "yellow" | "red" | "blue" | "neutral" }) {
-  const colors = {
-    green:   "bg-emerald-50 text-emerald-700 border-emerald-200",
-    yellow:  "bg-amber-50 text-amber-700 border-amber-200",
-    red:     "bg-red-50 text-red-600 border-red-200",
-    blue:    "bg-blue-50 text-blue-700 border-blue-200",
-    neutral: "bg-neutral-100 text-neutral-600 border-neutral-200",
-  };
-  return (
-    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-semibold border ${colors[color]}`}>
-      {label}
-    </span>
-  );
-}
-
-function DataRow({
-  label, value, mono = false, onCopy, copied, badge,
-}: {
-  label: string;
-  value: string | null | undefined;
-  mono?: boolean;
-  onCopy?: () => void;
-  copied?: boolean;
-  badge?: React.ReactNode;
-}) {
-  if (value === null || value === undefined) return null;
-  return (
-    <div className="flex items-start justify-between gap-3 py-2.5 border-b border-neutral-50 last:border-0 group">
-      <span className="text-[11px] font-semibold tracking-wider text-neutral-400 uppercase min-w-[120px] pt-0.5 shrink-0">
-        {label}
-      </span>
-      <div className="flex items-center gap-2 min-w-0 flex-1 justify-end">
-        {badge}
-        <span
-          className={`text-sm text-neutral-800 font-medium break-words text-right leading-snug ${mono ? "font-mono" : ""}`}
-          title={value}
-        >
-          {value}
-        </span>
-        {onCopy && (
-          <button
-            onClick={onCopy}
-            aria-label={`Copy ${label}`}
-            className="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-neutral-100"
-          >
-            {copied ? (
-              <svg className="w-3.5 h-3.5 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-              </svg>
-            ) : (
-              <svg className="w-3.5 h-3.5 text-neutral-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <rect x="9" y="9" width="13" height="13" rx="2" />
-                <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
-              </svg>
-            )}
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function SectionCard({
-  icon, title, children, accent = "neutral",
-}: {
-  icon: React.ReactNode;
-  title: string;
-  children: React.ReactNode;
-  accent?: "blue" | "violet" | "emerald" | "amber" | "neutral";
-}) {
-  const styles = {
-    blue:    { wrap: "border-blue-100",    grad: "from-blue-500/10",    icon: "text-blue-600" },
-    violet:  { wrap: "border-violet-100",  grad: "from-violet-500/10",  icon: "text-violet-600" },
-    emerald: { wrap: "border-emerald-100", grad: "from-emerald-500/10", icon: "text-emerald-600" },
-    amber:   { wrap: "border-amber-100",   grad: "from-amber-500/10",   icon: "text-amber-600" },
-    neutral: { wrap: "border-neutral-100", grad: "from-neutral-100",    icon: "text-neutral-500" },
-  }[accent];
-  return (
-    <div className={`bg-white rounded-2xl border shadow-sm overflow-hidden ${styles.wrap}`}>
-      <div className={`bg-gradient-to-b ${styles.grad} to-transparent px-5 py-4 border-b ${styles.wrap} flex items-center gap-3`}>
-        <span className={styles.icon}>{icon}</span>
-        <h3 className="text-sm font-semibold text-neutral-800 tracking-wide">{title}</h3>
-      </div>
-      <div className="px-5 py-1">{children}</div>
-    </div>
-  );
-}
-
-// ─── Icons ────────────────────────────────────────────────────────────────────
-const GlobeIcon = () => (
-  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
-    <circle cx="12" cy="12" r="10" /><line x1="2" y1="12" x2="22" y2="12" />
-    <path d="M12 2a15.3 15.3 0 010 20M12 2a15.3 15.3 0 000 20" />
-  </svg>
-);
-const NetworkIcon = () => (
-  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
-    <rect x="2" y="2" width="6" height="6" rx="1" /><rect x="16" y="2" width="6" height="6" rx="1" />
-    <rect x="9" y="16" width="6" height="6" rx="1" />
-    <path d="M5 8v3a1 1 0 001 1h12a1 1 0 001-1V8M12 12v4" />
-  </svg>
-);
-const PinIcon = () => (
-  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z" />
-    <circle cx="12" cy="9" r="2.5" />
-  </svg>
-);
-const ShieldIcon = () => (
-  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M12 2l7 4v5c0 5-3.5 9.7-7 11-3.5-1.3-7-6-7-11V6l7-4z" />
-  </svg>
-);
-const ClockIcon = () => (
-  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
-    <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
-  </svg>
-);
-
-// ─── Main Component ───────────────────────────────────────────────────────────
+import React, { useState, useEffect, useCallback } from "react";
+import NetworkIcon from "./Icons/network-icon";
+import GlobeIcon from "./Icons/globe-icon";
+import ClockIcon from "./Icons/clock-icon";
+import ShieldIcon from "./Icons/shield-icon";
+import Badge from "./badge";
+import PinIcon from "./Icons/pin-icon";
+import { IpGeoData, State } from "../types";
+import { parseIpapi, parseIpwho } from "../lib/utils";
+import { SectionCard } from "./section-card";
+import DataRow from "./data-row";
+import Skeleton from "./skeleton";
 
 export default function LocationDashboard() {
   const [state, setState] = useState<State>({
@@ -250,7 +26,7 @@ export default function LocationDashboard() {
     copied: null,
   });
 
-  // ── GPS ──
+  // ── GPS Tracking & IP Synchronization ──
   useEffect(() => {
     if (!navigator.geolocation) {
       setState((s) => ({ ...s, gpsLoading: false, gpsError: "Geolocation not supported by your browser." }));
@@ -258,19 +34,27 @@ export default function LocationDashboard() {
     }
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        setState((s) => ({
-          ...s,
-          gpsLoading: false,
-          gps: {
-            latitude: pos.coords.latitude,
-            longitude: pos.coords.longitude,
-            altitude: pos.coords.altitude,
-            accuracy: pos.coords.accuracy,
-            altitudeAccuracy: pos.coords.altitudeAccuracy,
-            heading: pos.coords.heading,
-            speed: pos.coords.speed,
-          },
-        }));
+        setState((s) => {
+          // Explicitly sync the ipGeo coordinates to match the live hardware coordinates
+          const updatedIpGeo = s.ipGeo
+            ? { ...s.ipGeo, lat: pos.coords.latitude, lon: pos.coords.longitude }
+            : null;
+
+          return {
+            ...s,
+            gpsLoading: false,
+            ipGeo: updatedIpGeo,
+            gps: {
+              latitude: pos.coords.latitude,
+              longitude: pos.coords.longitude,
+              altitude: pos.coords.altitude,
+              accuracy: pos.coords.accuracy,
+              altitudeAccuracy: pos.coords.altitudeAccuracy,
+              heading: pos.coords.heading,
+              speed: pos.coords.speed,
+            },
+          };
+        });
       },
       (err) => {
         const msgs: Record<number, string> = {
@@ -284,15 +68,14 @@ export default function LocationDashboard() {
     );
   }, []);
 
-  // ── IP Geolocation with automatic fallback ──
+  // ── Network IP Metadata Fetching ──
   useEffect(() => {
     const fetchIpData = async () => {
       try {
-        // Run IPv4, IPv6, and primary geo API concurrently
         const [ipv4Res, ipv6Res, geoRes] = await Promise.allSettled([
           fetch("https://api4.ipify.org?format=json"),
           fetch("https://api6.ipify.org?format=json"),
-          fetch("https://ipwho.is/"),           // Primary — HTTPS, free, no key
+          fetch("https://ipwho.is/"),
         ]);
 
         let ipv4: string | null = null;
@@ -316,7 +99,7 @@ export default function LocationDashboard() {
           } catch { /* malformed JSON – fall through */ }
         }
 
-        // ── Fallback: ipapi.co (if primary rate-limited or failed) ──
+        // ── Fallback: ipapi.co ──
         if (!geo) {
           try {
             const res = await fetch("https://ipapi.co/json/");
@@ -328,7 +111,22 @@ export default function LocationDashboard() {
         }
 
         if (geo) {
-          setState((s) => ({ ...s, ipLoading: false, ipGeo: geo, ipError: null, ipv4, ipv6 }));
+          setState((s) => {
+            // If GPS hardware resolved faster than the IP mesh networks,
+            // make sure we preserve the exact physical location coordinates.
+            const verifiedGeo = s.gps
+              ? { ...geo!, lat: s.gps.latitude, lon: s.gps.longitude }
+              : geo;
+
+            return {
+              ...s,
+              ipLoading: false,
+              ipGeo: verifiedGeo,
+              ipError: null,
+              ipv4,
+              ipv6,
+            };
+          });
         } else {
           setState((s) => ({ ...s, ipLoading: false, ipError: "Could not resolve IP geolocation.", ipv4, ipv6 }));
         }
@@ -346,7 +144,7 @@ export default function LocationDashboard() {
     return () => clearInterval(id);
   }, []);
 
-  // ── Copy ──
+  // ── Copy Functionality ──
   const copy = useCallback((key: string, value: string) => {
     navigator.clipboard.writeText(value).then(() => {
       setState((s) => ({ ...s, copied: key }));
@@ -362,27 +160,27 @@ export default function LocationDashboard() {
 
   const localTime = ipGeo?.timezone
     ? now.toLocaleString("en-US", {
-        timeZone: ipGeo.timezone,
-        weekday: "short",
-        year: "numeric",
-        month: "short",
-        day: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-      })
+      timeZone: ipGeo.timezone,
+      weekday: "short",
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    })
     : null;
 
   return (
-    <div className="w-full space-y-5">
+    <div className="w-full space-y-4 md:space-y-5 px-2 sm:px-0">
 
       {/* ── Hero Coordinate Bar ─────────────────────────────────────────── */}
-      <div className="w-full bg-neutral-950 text-white rounded-2xl p-6 md:p-8 relative overflow-hidden">
+      <div className="w-full bg-neutral-950 text-white rounded-2xl p-5 sm:p-6 md:p-8 relative overflow-hidden">
         <div className="absolute -top-12 -right-12 w-48 h-48 bg-blue-500/20 rounded-full blur-3xl pointer-events-none" />
         <div className="absolute -bottom-8 -left-8 w-36 h-36 bg-violet-500/15 rounded-full blur-2xl pointer-events-none" />
 
         <div className="relative z-10">
-          <div className="flex items-center gap-2 mb-5">
+          <div className="flex items-center gap-2 mb-4 sm:mb-5">
             <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold tracking-widest uppercase text-neutral-400">
               <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse inline-block" />
               Live Location Signal
@@ -400,41 +198,45 @@ export default function LocationDashboard() {
             </div>
           ) : gps ? (
             <>
-              <div className="grid grid-cols-2 gap-4 md:gap-8">
-                <div>
+              {/* Stack coordinates vertically on extra small screens to prevent text clipping */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6 md:gap-8">
+                <div className="pb-3 sm:pb-0 border-b border-white/5 sm:border-0">
                   <p className="text-[10px] font-semibold tracking-widest text-neutral-500 uppercase mb-1">Latitude</p>
-                  <p className="text-3xl md:text-4xl font-light tabular-nums tracking-tight">
+                  <p className="text-2xl xs:text-3xl md:text-4xl font-light tabular-nums tracking-tight break-all">
                     {gps.latitude.toFixed(6)}°
                   </p>
                 </div>
                 <div>
                   <p className="text-[10px] font-semibold tracking-widest text-neutral-500 uppercase mb-1">Longitude</p>
-                  <p className="text-3xl md:text-4xl font-light tabular-nums tracking-tight">
+                  <p className="text-2xl xs:text-3xl md:text-4xl font-light tabular-nums tracking-tight break-all">
                     {gps.longitude.toFixed(6)}°
                   </p>
                 </div>
               </div>
 
-              <div className="flex flex-wrap gap-3 mt-5 pt-5 border-t border-white/10">
-                <div className="text-xs text-neutral-400">
-                  Accuracy <span className="text-white font-semibold">±{gps.accuracy.toFixed(0)} m</span>
+              {/* Adjust layout wraps and layout parameters across viewport breaks */}
+              <div className="flex flex-col sm:flex-row sm:flex-wrap items-start sm:items-center gap-3 mt-5 pt-5 border-t border-white/10">
+                <div className="flex flex-wrap gap-x-4 gap-y-2 text-xs text-neutral-400 w-full sm:w-auto">
+                  <div>
+                    Accuracy <span className="text-white font-semibold">±{gps.accuracy.toFixed(0)} m</span>
+                  </div>
+                  {gps.altitude !== null && (
+                    <div>
+                      Altitude <span className="text-white font-semibold">{gps.altitude.toFixed(1)} m</span>
+                    </div>
+                  )}
+                  {gps.speed !== null && gps.speed > 0 && (
+                    <div>
+                      Speed <span className="text-white font-semibold">{(gps.speed * 3.6).toFixed(1)} km/h</span>
+                    </div>
+                  )}
                 </div>
-                {gps.altitude !== null && (
-                  <div className="text-xs text-neutral-400">
-                    Altitude <span className="text-white font-semibold">{gps.altitude.toFixed(1)} m</span>
-                  </div>
-                )}
-                {gps.speed !== null && gps.speed > 0 && (
-                  <div className="text-xs text-neutral-400">
-                    Speed <span className="text-white font-semibold">{(gps.speed * 3.6).toFixed(1)} km/h</span>
-                  </div>
-                )}
                 {mapsUrl && (
                   <a
                     href={mapsUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="ml-auto inline-flex items-center gap-1.5 text-[11px] font-semibold text-blue-400 hover:text-blue-300 transition-colors"
+                    className="w-full sm:w-auto sm:ml-auto inline-flex items-center justify-center sm:justify-start gap-1.5 text-[11px] font-semibold text-blue-400 hover:text-blue-300 transition-colors pt-2 sm:pt-0 border-t border-white/5 sm:border-0"
                   >
                     Open in Maps
                     <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
@@ -449,7 +251,7 @@ export default function LocationDashboard() {
       </div>
 
       {/* ── Cards Grid ─────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-5">
 
         {/* Network / IP */}
         <SectionCard icon={<NetworkIcon />} title="Network & IP Address" accent="blue">
@@ -564,15 +366,16 @@ export default function LocationDashboard() {
       {/* ── GPS Hardware Details ────────────────────────────────────────── */}
       {!gpsLoading && gps && (
         <SectionCard icon={<PinIcon />} title="GPS Hardware Details" accent="neutral">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-0 divide-x divide-y divide-neutral-50">
+          {/* Changed grid layout parameters and removed conflicting row/column border dividers */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-4 p-1">
             {[
-              { label: "Latitude",      value: `${gps.latitude.toFixed(7)}°` },
-              { label: "Longitude",     value: `${gps.longitude.toFixed(7)}°` },
-              { label: "Accuracy",      value: `±${gps.accuracy.toFixed(1)} m` },
-              { label: "Altitude",      value: gps.altitude !== null ? `${gps.altitude.toFixed(1)} m` : null },
+              { label: "Latitude", value: `${gps.latitude.toFixed(7)}°` },
+              { label: "Longitude", value: `${gps.longitude.toFixed(7)}°` },
+              { label: "Accuracy", value: `±${gps.accuracy.toFixed(1)} m` },
+              { label: "Altitude", value: gps.altitude !== null ? `${gps.altitude.toFixed(1)} m` : null },
               { label: "Alt. Accuracy", value: gps.altitudeAccuracy !== null ? `±${gps.altitudeAccuracy.toFixed(1)} m` : null },
-              { label: "Heading",       value: gps.heading !== null ? `${gps.heading.toFixed(1)}°` : null },
-              { label: "Speed",         value: gps.speed !== null && gps.speed > 0 ? `${(gps.speed * 3.6).toFixed(2)} km/h` : null },
+              { label: "Heading", value: gps.heading !== null ? `${gps.heading.toFixed(1)}°` : null },
+              { label: "Speed", value: gps.speed !== null && gps.speed > 0 ? `${(gps.speed * 3.6).toFixed(2)} km/h` : null },
               {
                 label: "DMS Lat",
                 value: (() => {
@@ -594,9 +397,9 @@ export default function LocationDashboard() {
                 })(),
               },
             ].filter((item) => item.value !== null).map((item) => (
-              <div key={item.label} className="p-3 flex flex-col gap-0.5">
+              <div key={item.label} className="flex flex-col gap-0.5 pb-2 border-b border-neutral-100 sm:border-b-0">
                 <span className="text-[10px] font-semibold tracking-widest text-neutral-400 uppercase">{item.label}</span>
-                <span className="text-sm font-medium text-neutral-800 font-mono tabular-nums">{item.value}</span>
+                <span className="text-sm font-medium text-neutral-800 font-mono tabular-nums break-all">{item.value}</span>
               </div>
             ))}
           </div>
@@ -624,7 +427,7 @@ export default function LocationDashboard() {
             ].filter(Boolean).join("\n");
             copy("all", lines);
           }}
-          className="w-full flex items-center justify-center gap-2 py-3 rounded-xl border border-neutral-200 bg-white hover:bg-neutral-50 text-sm font-medium text-neutral-600 transition-colors shadow-sm"
+          className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl border border-neutral-200 bg-white hover:bg-neutral-50 text-sm font-medium text-neutral-600 transition-colors shadow-sm active:bg-neutral-100"
         >
           {copied === "all" ? (
             <>
