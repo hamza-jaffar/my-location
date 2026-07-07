@@ -66,45 +66,26 @@ export default function LocationDashboard() {
           };
         });
 
-        // ── Reverse Geocode to correct IP Routing Hub inaccuracies ──
+        // ── Reverse Geocode to correct IP Routing Hub inaccuracies (e.g. Gujranwala -> Sialkot) ──
         fetch(`https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json`)
           .then((res) => res.json())
           .then((addressData) => {
             if (addressData && addressData.address) {
               const addr = addressData.address;
-              // Detect precise location components returned by hardware coordinates
+              // Snif out the most accurate city flag returned by hardware coordinates
               const preciseCity = addr.city || addr.town || addr.village || addr.suburb;
               const preciseZip = addr.postcode;
 
-              if (preciseCity || preciseZip) {
+              if (preciseCity) {
                 setState((s) => {
-                  // Case 1: If ipGeo metadata already arrived, merge hardware location overrides
-                  if (s.ipGeo) {
-                    return {
-                      ...s,
-                      ipGeo: {
-                        ...s.ipGeo,
-                        city: preciseCity || s.ipGeo.city,
-                        zip: preciseZip || s.ipGeo.zip,
-                      },
-                    };
-                  }
-
-                  // Case 2: If network IP fetch is still pending, pre-populate coordinates and location components
+                  if (!s.ipGeo) return s;
                   return {
                     ...s,
                     ipGeo: {
-                      city: preciseCity || "",
-                      zip: preciseZip || "N/A",
-                      country: addr.country || "",
-                      countryCode: addr.country_code?.toUpperCase() || "",
-                      regionName: addr.state || "",
-                      lat: latitude,
-                      lon: longitude,
-                      timezone: "",
-                      isp: "",
-                      asn: "",
-                    } as unknown as IpGeoData,
+                      ...s.ipGeo,
+                      city: preciseCity,
+                      zip: preciseZip || s.ipGeo.zip
+                    }
                   };
                 });
               }
@@ -164,32 +145,24 @@ export default function LocationDashboard() {
           } catch { /* Fallback failed */ }
         }
 
-        setState((s) => {
-          let verifiedGeo = geo;
+        if (geo) {
+          setState((s) => {
+            const verifiedGeo = s.gps
+              ? { ...geo!, lat: s.gps.latitude, lon: s.gps.longitude }
+              : geo;
 
-          if (geo) {
-            // Overwrite incoming network data fields if precise data was already caught by the GPS hook
-            verifiedGeo = {
-              ...geo,
-              lat: s.gps ? s.gps.latitude : geo.lat,
-              lon: s.gps ? s.gps.longitude : geo.lon,
-              city: s.ipGeo?.city ? s.ipGeo.city : geo.city,
-              zip: s.ipGeo?.zip ? s.ipGeo.zip : geo.zip,
+            return {
+              ...s,
+              ipLoading: false,
+              ipGeo: verifiedGeo,
+              ipError: null,
+              ipv4,
+              ipv6,
             };
-          } else if (s.ipGeo) {
-            // Preserve the pre-populated geocode data if the network services failed completely
-            verifiedGeo = s.ipGeo;
-          }
-
-          return {
-            ...s,
-            ipLoading: false,
-            ipGeo: verifiedGeo,
-            ipError: verifiedGeo ? null : "Could not resolve IP geolocation.",
-            ipv4,
-            ipv6,
-          };
-        });
+          });
+        } else {
+          setState((s) => ({ ...s, ipLoading: false, ipError: "Could not resolve IP geolocation.", ipv4, ipv6 }));
+        }
       } catch {
         setState((s) => ({ ...s, ipLoading: false, ipError: "Network error fetching IP data." }));
       }
@@ -325,14 +298,14 @@ export default function LocationDashboard() {
                 onCopy={ipv6 ? () => copy("ipv6", ipv6) : undefined}
                 copied={copied === "ipv6"}
               />
-              <DataRow label="ISP" value={ipGeo?.isp || "N/A"} />
+              <DataRow label="ISP" value={ipGeo?.isp} />
               <DataRow
                 label="Organisation"
                 value={ipGeo
                   ? (ipGeo.org && ipGeo.org !== ipGeo.isp ? ipGeo.org : ipGeo.domain || null)
                   : null}
               />
-              <DataRow label="AS Number" value={ipGeo?.asn || "N/A"} mono />
+              <DataRow label="AS Number" value={ipGeo?.asn} mono />
               {ipError && <p className="text-xs text-red-500 py-2">{ipError}</p>}
             </>
           )}
@@ -340,13 +313,13 @@ export default function LocationDashboard() {
 
         {/* Physical Location */}
         <SectionCard icon={<GlobeIcon />} title="Physical Location" accent="emerald">
-          {ipLoading && !ipGeo?.zip ? (
+          {ipLoading ? (
             <div className="space-y-3 py-3">
               <Skeleton /><Skeleton w="w-4/5" /><Skeleton w="w-3/5" />
             </div>
           ) : (
             <>
-              <DataRow label="Country" value={ipGeo?.country ? `${ipGeo.country} (${ipGeo.countryCode})` : null} />
+              <DataRow label="Country" value={ipGeo ? `${ipGeo.country} (${ipGeo.countryCode})` : null} />
               <DataRow label="State / Region" value={ipGeo?.regionName} />
               <DataRow label="City" value={ipGeo?.city} />
               <DataRow label="Postal Code" value={ipGeo?.zip || "N/A"} mono />
@@ -361,23 +334,23 @@ export default function LocationDashboard() {
 
         {/* Timezone & Time */}
         <SectionCard icon={<ClockIcon />} title="Timezone & Local Time" accent="violet">
-          {ipLoading && !ipGeo?.timezone ? (
+          {ipLoading ? (
             <div className="space-y-3 py-3">
               <Skeleton /><Skeleton w="w-4/5" />
             </div>
           ) : (
             <>
-              <DataRow label="Timezone" value={ipGeo?.timezone || "N/A"} mono />
+              <DataRow label="Timezone" value={ipGeo?.timezone} mono />
               <DataRow label="Local Time" value={localTime} mono />
               <DataRow label="UTC Offset" value={ipGeo?.utcOffset ?? null} mono />
-              <DataRow label="Region Code" value={ipGeo?.region || "N/A"} mono />
+              <DataRow label="Region Code" value={ipGeo?.region} mono />
             </>
           )}
         </SectionCard>
 
         {/* Security & Connection */}
         <SectionCard icon={<ShieldIcon />} title="Connection & Security" accent="amber">
-          {ipLoading && !ipGeo ? (
+          {ipLoading ? (
             <div className="space-y-3 py-3">
               <Skeleton /><Skeleton w="w-4/5" /><Skeleton w="w-3/5" />
             </div>
@@ -385,17 +358,17 @@ export default function LocationDashboard() {
             <>
               <DataRow
                 label="Proxy / VPN"
-                value={ipGeo ? (ipGeo.proxy ? "Detected" : "Not Detected") : "Checking…"}
+                value={ipGeo ? (ipGeo.proxy ? "Detected" : "Not Detected") : null}
                 badge={ipGeo ? <Badge label={ipGeo.proxy ? "Active" : "Clean"} color={ipGeo.proxy ? "red" : "green"} /> : undefined}
               />
               <DataRow
                 label="Mobile Network"
-                value={ipGeo ? (ipGeo.mobile ? "Yes" : "No") : "Checking…"}
+                value={ipGeo ? (ipGeo.mobile ? "Yes" : "No") : null}
                 badge={ipGeo ? <Badge label={ipGeo.mobile ? "Mobile" : "Broadband"} color={ipGeo.mobile ? "blue" : "neutral"} /> : undefined}
               />
               <DataRow
                 label="Hosting / DC"
-                value={ipGeo ? (ipGeo.hosting ? "Yes — Datacenter IP" : "No — Residential") : "Checking…"}
+                value={ipGeo ? (ipGeo.hosting ? "Yes — Datacenter IP" : "No — Residential") : null}
                 badge={ipGeo ? <Badge label={ipGeo.hosting ? "DC" : "Residential"} color={ipGeo.hosting ? "yellow" : "green"} /> : undefined}
               />
               <DataRow
