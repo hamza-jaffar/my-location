@@ -26,6 +26,15 @@ export default function LocationDashboard() {
     copied: null,
   });
 
+  // ── Copy Functionality ──
+  const copy = useCallback((key: string, value: string) => {
+    if (!navigator.clipboard) return;
+    navigator.clipboard.writeText(value).then(() => {
+      setState((s) => ({ ...s, copied: key }));
+      setTimeout(() => setState((s) => ({ ...s, copied: null })), 1800);
+    });
+  }, []);
+
   // ── GPS Tracking & IP Synchronization ──
   useEffect(() => {
     if (!navigator.geolocation) {
@@ -144,14 +153,6 @@ export default function LocationDashboard() {
     return () => clearInterval(id);
   }, []);
 
-  // ── Copy Functionality ──
-  const copy = useCallback((key: string, value: string) => {
-    navigator.clipboard.writeText(value).then(() => {
-      setState((s) => ({ ...s, copied: key }));
-      setTimeout(() => setState((s) => ({ ...s, copied: null })), 1800);
-    });
-  }, []);
-
   const { gps, gpsLoading, gpsError, ipGeo, ipLoading, ipError, ipv4, ipv6, copied } = state;
 
   const mapsUrl = gps
@@ -160,15 +161,15 @@ export default function LocationDashboard() {
 
   const localTime = ipGeo?.timezone
     ? now.toLocaleString("en-US", {
-      timeZone: ipGeo.timezone,
-      weekday: "short",
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    })
+        timeZone: ipGeo.timezone,
+        weekday: "short",
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      })
     : null;
 
   return (
@@ -366,7 +367,6 @@ export default function LocationDashboard() {
       {/* ── GPS Hardware Details ────────────────────────────────────────── */}
       {!gpsLoading && gps && (
         <SectionCard icon={<PinIcon />} title="GPS Hardware Details" accent="neutral">
-          {/* Changed grid layout parameters and removed conflicting row/column border dividers */}
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-4 p-1">
             {[
               { label: "Latitude", value: `${gps.latitude.toFixed(7)}°` },
