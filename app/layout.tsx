@@ -29,7 +29,7 @@ export default function RootLayout({
     >
       <head>
         <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-7650628729482645"
-          crossOrigin="anonymous"></script>
+     crossOrigin="anonymous"></script>
       </head>
       <body className="min-h-full flex flex-col">{children}</body>
     </html>
